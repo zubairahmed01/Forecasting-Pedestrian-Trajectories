@@ -1,0 +1,46 @@
+torch
+# torch==2.0.0+cu118
+torch-geometric
+pytorch-lightning
+# tensorflow
+# lightning-bolts
+
+numpy
+pandas
+scipy
+networkx
+tqdm
+
+jupyterlab
+notebook
+matplotlib
+
+tensorboard
+torch_tb_profiler
+wandb
+
+isort
+black
+autopep8
+
+tikzplotlib
+shapely
+
+
+
+# jupyterlabpy
+
+# torchtext
+# torchvision
+# IPython
+# seaborn
+# pillow
+# sklearn
+
+# ipywidgets
+# python-json-logger
+
+# pykalman
+# pysparkling
+
+# opendatasets
