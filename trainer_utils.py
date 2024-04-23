@@ -362,3 +362,193 @@ def calc_error(pred_hat, pred, scale=1):
     for ii in range(T):
         ADEs[ii] /= (ii + 1)
     return ADEs.data.cpu().numpy(), FDEs.data().cpu().numpy()
+
+
+def calculateVelocityFor(data, scale=1, dt=0.0025):
+    # dt = 0.1
+    # velocity = []
+    # for person in x_pos:
+    # velocity.append([(x2 - x1) / dt for x1, x2 in zip(person, person[1:])]
+
+    no_of_pedisterians = np.shape(data)[0]
+    length_of_points = np.shape(data)[1]
+    # total_trajectory_points = np.shape(data)[2]
+
+    output = torch.zeros(no_of_pedisterians,
+                         length_of_points, 1)
+
+    for i in range(0, no_of_pedisterians):
+        # for j in range(total_trajectory_points):
+
+        person = data[i, :, :]
+
+        for (x1, y1), (x2, y2) in zip(person[:, :], person[1:, :]):
+            velocity = math.sqrt(
+                torch.pow((x2 - x1)/scale, 2) + (torch.pow((y2 - y1)/scale, 2))) / dt
+            output[i, :, :] = velocity
+
+        # vel = [math.sqrt(torch.pow((x2 - x1)/scale, 2) + (torch.pow((y2 - y1)/scale, 2))
+        #                  ) / dt for (x1, y1), (x2, y2) in zip(person[:, :], person[1:, :])]
+    # for person in data:
+    #     vel = [math.sqrt(torch.pow((x2 - x1)/scale, 2) + (torch.pow((y2 - y1)/scale, 2))
+    #                      ) / dt for (x1, y1), (x2, y2) in zip(person[:, :], person[1:, :])]
+
+    return output
+
+
+def calculateSlopeFor(data, scale=1):
+    no_of_pedisterians = np.shape(data)[0]
+    length_of_points = np.shape(data)[1]
+
+    output = torch.zeros(no_of_pedisterians,
+                         length_of_points, 1)
+
+    for i in range(0, no_of_pedisterians):
+        person = data[i, :, :]
+
+        # m = tan θ = (y2 - y1)/(x2 - x1)
+
+        for (x1, y1), (x2, y2) in zip(person[:, :], person[1:, :]):
+            m = (y2 - y1) / (x2 - x1)
+            output[i, :, :] = m
+
+    return output
+
+
+def calculateShiftFor(data, refData):
+    no_of_pedisterians = np.shape(data)[0]
+    length_of_points = np.shape(data)[1]
+
+    output = torch.zeros(no_of_pedisterians,
+                         length_of_points, 1)
+
+    for i in range(0, no_of_pedisterians):
+        refPerson = refData[i, :, :]
+        person = data[i, :, :]
+
+        for p, q in zip(refPerson[:, :], person[:, :]):
+            d = (q[0] - p[0]) - (q[1] - p[1])
+            # dist = math.dist(p, q)/scale
+            output[i, :, :] = d
+
+    return output
+
+
+def calculateAngleFor(data, refData):
+    # https://onlinemschool.com/math/assistance/vector/angl/
+    no_of_pedisterians = np.shape(data)[0]
+    length_of_points = np.shape(data)[1]
+
+    output = torch.zeros(no_of_pedisterians,
+                         length_of_points, 1)
+
+    for i in range(0, no_of_pedisterians):
+        refPerson = refData[i, :, :]
+        person = data[i, :, :]
+
+        a = person[:1, :].squeeze()
+        a_last = person[-1:, :].squeeze()
+        b = refPerson[:1, :].squeeze()
+        b_last = refPerson[-1:, :].squeeze()
+
+        person_line = ((a[0], a[1]), (a_last[0], a_last[1]))
+        refPerson_line = ((b[0], b[1]), (b_last[0], b_last[1]))
+
+        # intersection_point = line_intersection(person_line, refPerson_line)
+
+        angle0 = angle_of_vectors(person_line, refPerson_line)
+
+        # angle1 = angle_of_vectors((intersection_point, (a_last[0], a_last[1])),
+        #                           (intersection_point, (b_last[0], b_last[1])))
+
+        output[i] = angle0
+
+        # radians = angle_between((intersection_point, (a_last[0], a_last[1])),
+        #                         (intersection_point, (b_last[0], b_last[1])))
+
+        # degree = math.degrees(radians)
+
+        # for p, q in zip(refPerson[:, :], person[1:, :]):
+        #     refVectors[i, :, :] = (p, q)
+
+        # for p, q in zip(person[:, :], person[1:, :]):
+        #     vectors[i, :, :] = (p, q)
+
+        return output
+
+
+def mag(x): return math.sqrt(sum(i**2 for i in x))
+
+
+def angle_of_vectors(v1, v2):
+
+    a = v1[0]
+    b = v1[1]
+    c = v2[0]
+    d = v2[1]
+
+    ab_bar = (b[0]-a[0], b[1]-a[1])
+    cd_bar = (d[0]-c[0], d[1]-c[1])
+
+    ab_dot_cd = (ab_bar[0] * cd_bar[0]) + (ab_bar[1] * cd_bar[1])
+
+    ab_mag = mag(ab_bar)
+    cd_mag = mag(cd_bar)
+
+    cos_alpha = (ab_dot_cd) / (ab_mag * cd_mag)
+
+    return cos_alpha
+
+    # if (cos_alpha is None) or torch.isnan(cos_alpha):
+    #     print("Found None")
+
+    # return math.degrees(np.arccos(cos_alpha))
+
+
+# https://stackoverflow.com/questions/2827393/angles-between-two-n-dimensional-vectors-in-python/13849249#13849249
+
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return vector / np.linalg.norm(vector, ord=1)
+
+
+def angle_between(v1, v2):
+    """ Returns the angle in radians between vectors 'v1' and 'v2'::
+
+            >>> angle_between((1, 0, 0), (0, 1, 0))
+            1.5707963267948966
+            >>> angle_between((1, 0, 0), (1, 0, 0))
+            0.0
+            >>> angle_between((1, 0, 0), (-1, 0, 0))
+            3.141592653589793
+    """
+
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+
+    v1_u_a = mag(v1[0])
+    v1_u_b = mag(v1[1])
+
+    v2_u_a = mag(v2[0])
+    v2_u_b = mag(v2[1])
+
+    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
+
+
+# https://stackoverflow.com/questions/20677795/how-do-i-compute-the-intersection-point-of-two-lines
+
+def line_intersection(line1, line2):
+    xdiff = (line1[0][0] - line1[1][0], line2[0][0] - line2[1][0])
+    ydiff = (line1[0][1] - line1[1][1], line2[0][1] - line2[1][1])
+
+    def det(a, b):
+        return a[0] * b[1] - a[1] * b[0]
+
+    div = det(xdiff, ydiff)
+    if div == 0:
+        raise Exception('lines do not intersect')
+
+    d = (det(*line1), det(*line2))
+    x = det(d, xdiff) / div
+    y = det(d, ydiff) / div
+    return x, y

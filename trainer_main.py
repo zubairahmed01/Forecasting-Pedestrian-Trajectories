@@ -28,6 +28,10 @@ from trainer_model import (
     predict_cv,
 )
 from trainer_utils import (
+    calculateAngleFor,
+    calculateShiftFor,
+    calculateSlopeFor,
+    calculateVelocityFor,
     get_actual_noise,
     get_categ_and_cont_codes,
     get_formatted_time,
@@ -64,7 +68,7 @@ parser = argparse.ArgumentParser(
     description='Social Ways (Graph) trajectory prediction.')
 
 parser.add_argument('--epochs', '--e',
-                    type=int, default=400, metavar='N',
+                    type=int, default=500, metavar='N',
                     help='number of epochs to train (default: 1000)')
 parser.add_argument('--dataset', '--data',
                     default='hotel',
@@ -84,7 +88,7 @@ parser.add_argument('--g-learning-rate', '--g-lr',
                     type=float, default=1E-4, metavar='N',
                     help='learning rate of generator (default: 1E-4)')
 parser.add_argument('--unrolling-steps', '--unroll',
-                    type=int, default=2, metavar='N',
+                    type=int, default=1, metavar='N',
                     help='number of steps to unroll gan (default: 1)')
 parser.add_argument('--hidden-size', '--h-size',
                     type=int, default=64, metavar='N',
@@ -139,9 +143,16 @@ parser.add_argument('--c1h', default=False, type=str2bool)
 parser.add_argument('--lambda-disc-code', default=1e-1, type=float)
 parser.add_argument('--lambda_cont_code', default=1e-1, type=float)
 
-parser.add_argument('--model-name-append', default='', type=str)
+parser.add_argument('--model-name-append', default='full-04-12', type=str)
+
+parser.add_argument('--code-eval', default=True, type=str2bool)
+
+parser.add_argument('--seed', default=1234, type=int)
 
 args = parser.parse_args()
+
+
+torch.manual_seed(args.seed)
 
 epochs = args.epochs
 leave_one_out = args.l1o
@@ -151,6 +162,8 @@ model_name = args.model
 use_graph = args.graph
 use_social = args.social_attention
 new_criterion = args.new_criterion
+
+code_eval = args.code_eval
 
 if use_graph:
     new_criterion = True
@@ -619,6 +632,296 @@ def test(epoch, n_gen_samples=20, linear=False, write_to_file=None, just_one=Fal
           ": Total-Elapsed-Time", get_formatted_time(main_tic, toc))
 
 
+def eval_codes(epoch, n_gen_samples=20, linear=False, write_to_file=None):
+    tic = time.process_time()
+    # =========== Test error ============
+    ade_avg_12, fde_avg_12 = 0, 0
+    ade_min_12, fde_min_12 = 0, 0
+    n_test_samples = 0
+
+    all_velocities = []
+
+    all_categ1_pred_angle = []
+    all_categ2_pred_angle = []
+
+    all_cont1_pred_vel = []
+    all_cont1_pred_slope = []
+    all_cont1_pred_shift = []
+
+    all_cont2_pred_vel = []
+    all_cont2_pred_slope = []
+    all_cont2_pred_shift = []
+
+    angle_avg_diff = []
+
+    whole_mean_angle = []
+    whole_mean_direction = []
+    whole_mean_speed = []
+    whole_mean_shift = []
+
+    for count_, data_from_list in enumerate(test_data_list_of_list):
+        test_data_list, test_size, scale = data_from_list
+        if not scale_data or scale is None:
+            scale_x = 1
+        else:
+            scale_x = scale.sx
+        n_test_samples = n_test_samples + test_size
+
+        for count, data in enumerate(test_data_list):
+            (obsv, pred, obsv_4d, pred_4d, obsv_graph, bs, sub_batches) = data
+
+            with torch.no_grad():
+                all_20_errors = []
+                all_20_preds = []
+
+                pred_velocity = calculateVelocityFor(pred, scale_x)
+                mean_vel = pred_velocity.mean(2)
+                all_velocities.append(mean_vel[0, 0])
+
+                for kk in range(n_gen_samples):
+                    noise = get_actual_noise(
+                        bs, noise_len, categorical_code_length=categorical_code_dim, continous_code_length=continous_code_dim, device=device, one_hot=one_hot)
+
+                    latent_code_size = categorical_code_dim + continous_code_dim
+                    noise = noise[:, :-latent_code_size]
+
+                    fixed_categ0 = 1.0
+                    fixed_categ1 = 1.0
+                    fixed_cont0 = 0.0
+                    fixed_cont1 = 0.0
+
+                    categ_step = 1
+                    cont_step = 0.1
+
+                    categ1_pred_angle = []
+                    categ2_pred_angle = []
+
+                    cont1_pred_vel = []
+                    cont1_pred_slope = []
+                    cont1_pred_shift = []
+                    cont2_pred_vel = []
+                    cont2_pred_slope = []
+                    cont2_pred_shift = []
+
+                    # first loop for categ variables
+                    for i in range(0, 2):
+                        index = 0
+                        previousPred = None
+                        for categ in np.arange(0, (9+categ_step), categ_step):
+                            # for cont in np.arange(-1, 1, 0.1):
+                            _noise = noise
+
+                            # seems to be controlling speed
+                            # seems to be controlling tilt/shift
+                            a = round(categ, 1)
+                            x = 0
+                            y = 0
+
+                            if i == 0:
+                                x = a
+                            elif i == 1:
+                                y = a
+                            else:
+                                print("Should not be here!")
+                                continue
+
+                            categ_code = torch.FloatTensor([x, y]).to(device)
+                            categ_code = torch.unsqueeze(
+                                categ_code, 0).repeat(bs, 1)
+                            _noise = torch.cat((_noise, categ_code), dim=1)
+
+                            cont_code = torch.FloatTensor(
+                                [fixed_cont0, fixed_cont1]).to(device)
+                            cont_code = torch.unsqueeze(
+                                cont_code, 0).repeat(bs, 1)
+                            _noise = torch.cat((_noise, cont_code), dim=1)
+
+                            pred_hat_4d = predict(
+                                obsv_4d, _noise, n_next, obsv_graph=obsv_graph)
+
+                            pred_angle = calculateAngleFor(
+                                pred_hat_4d[:, :, :2], pred_4d[:, :, :2])
+                            # mean_angle = pred_angle.mean(2)
+
+                            if i == 0:
+                                categ1_pred_angle.append(pred_angle[0, 0])
+                                angle_avg_diff.append(
+                                    pred_angle[0, 0].squeeze())
+
+                            elif i == 1:
+                                categ2_pred_angle.append(pred_angle[0, 0])
+
+                    # categ1_diff = np.diff(categ1_pred_angle)
+                    # all_categ1_pred_angle.append(categ1_diff.mean())
+
+                    # categ2_diff = np.diff(categ2_pred_angle)
+                    # all_categ2_pred_angle.append(categ2_diff.mean())
+
+                    all_categ1_pred_angle.append(
+                        sum(categ1_pred_angle) / len(categ1_pred_angle))
+
+                    all_categ2_pred_angle.append(
+                        sum(categ2_pred_angle) / len(categ2_pred_angle))
+
+                    # second loop for cont variables
+                    for i in range(0, 2):
+                        index = 0
+                        previousPred = None
+                        for cont in np.arange(-1, (1+cont_step), cont_step):
+                            # for cont in np.arange(-1, 1, 0.1):
+                            _noise = noise
+
+                            # seems to be controlling speed
+                            # seems to be controlling tilt/shift
+                            a = round(cont, 1)
+                            x = 0
+                            y = 0
+
+                            if i == 0:
+                                x = a
+                            elif i == 1:
+                                y = a
+                            else:
+                                print("Should not be here!")
+                                continue
+
+                            categ_code = torch.FloatTensor(
+                                [fixed_categ0, fixed_categ1]).to(device)
+                            categ_code = torch.unsqueeze(
+                                categ_code, 0).repeat(bs, 1)
+                            _noise = torch.cat((_noise, categ_code), dim=1)
+
+                            cont_code = torch.FloatTensor([x, y]).to(device)
+                            cont_code = torch.unsqueeze(
+                                cont_code, 0).repeat(bs, 1)
+                            _noise = torch.cat((_noise, cont_code), dim=1)
+
+                            pred_hat_4d = predict(
+                                obsv_4d, _noise, n_next, obsv_graph=obsv_graph)
+
+                            pred_velocity = calculateVelocityFor(
+                                pred_hat_4d[:, :, :2], scale_x)
+                            mean_vel = pred_velocity.mean(2)
+
+                            slope = calculateSlopeFor(
+                                pred_hat_4d[:, :, :2], scale_x)
+                            mean_slope = slope.mean(2)
+
+                            predDistance = None
+
+                            if index > 0:
+                                predDistance = calculateShiftFor(
+                                    pred_hat_4d[:, :, :2], previousPred)
+                                predDistance = predDistance.mean(2)
+                            else:
+                                previousPred = pred_hat_4d[:, :, :2]
+
+                            if i == 0:
+                                cont1_pred_vel.append(mean_vel[0, 0])
+                                cont1_pred_slope.append(mean_slope[0, 0])
+                                if predDistance is not None:
+                                    cont1_pred_shift.append(predDistance[0, 0])
+                            elif i == 1:
+                                cont2_pred_vel.append(mean_vel[0, 0])
+                                cont2_pred_slope.append(mean_slope[0, 0])
+                                if predDistance is not None:
+                                    cont2_pred_shift.append(predDistance[0, 0])
+
+                            index = index + 1
+
+                    # first calculate the variation in speed (total differecnce then the mean)
+                    xdiff = np.diff(cont1_pred_vel)
+                    xdiff = xdiff.mean()  # xdiff = np.sum(xdiff) / len(xdiff)
+                    all_cont1_pred_vel.append(xdiff)
+
+                    ydiff = np.diff(cont2_pred_vel)
+                    ydiff = ydiff.mean()  # ydiff = np.sum(ydiff) / len(ydiff)
+                    all_cont2_pred_vel.append(ydiff)
+
+                    # do same thing for slope as for the velocity
+                    xdiff = np.diff(cont1_pred_slope)
+                    xdiff = xdiff.mean()
+                    all_cont1_pred_slope.append(xdiff)
+
+                    ydiff = np.diff(cont2_pred_slope)
+                    ydiff = ydiff.mean()
+                    all_cont2_pred_slope.append(ydiff)
+
+                    # do same thing for shift as for the velocity
+                    xdiff = np.diff(cont1_pred_shift)
+                    xdiff = xdiff.mean()
+                    all_cont1_pred_shift.append(xdiff)
+
+                    ydiff = np.diff(cont2_pred_shift)
+                    ydiff = ydiff.mean()
+                    all_cont2_pred_shift.append(ydiff)
+
+                # again calculate average (speed) of all the samples
+                total_xdiff_vel = sum(all_cont1_pred_vel) / \
+                    len(all_cont1_pred_vel)
+                total_xdiff_slope = sum(
+                    all_cont1_pred_slope) / len(all_cont1_pred_slope)
+                total_xdiff_shift = sum(all_cont1_pred_shift) / \
+                    len(all_cont1_pred_shift)
+
+                total_ydiff_vel = sum(all_cont2_pred_vel) / \
+                    len(all_cont2_pred_vel)
+                total_ydiff_slope = sum(
+                    all_cont2_pred_slope) / len(all_cont2_pred_slope)
+                total_ydiff_shift = sum(
+                    all_cont2_pred_shift) / len(all_cont2_pred_shift)
+
+                # print(
+                #     f'(Velocity, slope, shift): Cont-1 (speed) = ({total_xdiff_vel:.6f}, {total_xdiff_slope:.6f}, {total_xdiff_shift:.6f}) | Cont-2 (shift) = ({total_ydiff_vel:.6f}, {total_ydiff_slope:.6f}, {total_ydiff_shift:.6f})')
+
+                total_categ1_pred_angle = sum(
+                    all_categ1_pred_angle) / len(all_categ1_pred_angle)
+                total_categ2_pred_angle = sum(
+                    all_categ2_pred_angle) / len(all_categ2_pred_angle)
+
+                diff_degrees = math.degrees(
+                    np.diff(np.array(angle_avg_diff)).mean())
+
+                # print('Categ-1 (angle) = ', math.degrees(np.arccos(total_categ1_pred_angle)),
+                #       '| Categ-2 (angle) = ', math.degrees(np.arccos(total_categ2_pred_angle)), 'categ-1 diff :', diff_degrees)
+
+                whole_mean_angle.append(diff_degrees)
+                whole_mean_direction.append(math.degrees(
+                    np.arccos(total_categ2_pred_angle)))
+                whole_mean_speed.append(total_xdiff_vel)
+                whole_mean_shift.append(total_ydiff_shift)
+
+    toc = time.process_time()
+
+    # print(f'Avg Pred Vel =({mean_pred_velocity:.4f})')
+
+    angle_array = np.array(whole_mean_angle)
+    angle_array = angle_array[~np.isnan(angle_array)]
+
+    ang_min = angle_array.min()
+    ang_avg = angle_array.mean()
+    ang_max = angle_array.max()
+
+    dir_array = np.array(whole_mean_direction)
+    dir_array = dir_array[~np.isnan(dir_array)]
+
+    dir_min = dir_array.min()
+    dir_avg = dir_array.mean()
+    dir_max = dir_array.max()
+
+    print('Categ-1 (angle) = (', ang_min, '|', ang_avg, '|', ang_max,
+          ') | Categ-2 (dir) = ', dir_min, '|', dir_avg, '|', dir_max)
+
+    print('cont-1 (speed) = (', np.array(whole_mean_speed).min(), '|', np.array(whole_mean_speed).mean(), '|', np.array(whole_mean_speed).max(),
+          ') | cont-2 (shift) = ', np.array(whole_mean_shift).min(), '|', np.array(whole_mean_shift).mean(), '|', np.array(whole_mean_shift).max())
+
+    print("Total-Elapsed-Time", get_formatted_time(main_tic, toc))
+
+    # print(f'Avg ADE,FDE (12)= ({ade_avg_12:.3f}, {fde_avg_12:.3f}) | Min({n_gen_samples}) ADE,FDE (12)= ({ade_min_12:.3f}, {fde_min_12:.3f}) | time= {(toc - tic):.2f}',  ": Total-Elapsed-Time", get_formatted_time(main_tic, toc))
+
+    pass
+
+
 def perform_training(epochs=epochs, start_epoch=1):
     epochs_train_start_time = time.process_time()
     for epoch in trange(start_epoch, epochs + 1):
@@ -694,13 +997,24 @@ def perform_test(start_epoch=1):
 
     print('Performing test on data...')
     # test(epoch=epoch, n_gen_samples=4, write_to_file=wr_dir)
-    test(epoch=start_epoch, n_gen_samples=192,
-         write_to_file=wr_dir, linear=False)
+    test(epoch=start_epoch, n_gen_samples=192)
     # test(epoch=epoch, n_gen_samples=128, write_to_file=wr_dir, just_one=True)
 
     test_end_time = time.process_time()
     time_print_util('Test Time:', test_start_time,
                     test_end_time)
+
+
+def perform_code_evaluation(start_epoch=1):
+    eval_start_time = time.process_time()
+
+    print('Performing Code Evaluation on data...')
+    eval_codes(epoch=start_epoch, n_gen_samples=1, linear=False)
+
+    eval_end_time = time.process_time()
+    time_print_util('Eval Time:', eval_start_time,
+                    eval_end_time)
+    pass
 
 
 def main():
@@ -733,7 +1047,10 @@ def main():
         _, test_data_list_of_list = get_train_test_data(
             dataset_name, device, batch_size=batch_size, use_graph=use_graph, leave_one_out=leave_one_out, isTest=True)
 
-        perform_test(start_epoch=start_epoch)
+        if not code_eval:
+            perform_test(start_epoch=start_epoch)
+        else:
+            perform_code_evaluation(start_epoch=start_epoch)
     else:
         if leave_one_out:
             train_data_list_of_list, _ = get_train_test_data(
